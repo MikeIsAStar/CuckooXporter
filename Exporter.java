@@ -1,19 +1,20 @@
 /*****************************************************************************
  * Name : Mike
- * Date : 30 Mar 2022
+ * Date : 24 Apr 2022
  * File : Exporter.java
  *****************************************************************************/
 
-import ghidra.app.util.Option;
-import ghidra.app.util.OptionException;
-import ghidra.app.util.exporter.CppExporter;
-import ghidra.app.util.exporter.ExporterException;
+import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileOptions;
+import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.util.headless.HeadlessScript;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.FunctionIterator;
+import ghidra.program.model.listing.Program;
 
 import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
 
 public class Exporter extends HeadlessScript
 {
@@ -22,10 +23,10 @@ public class Exporter extends HeadlessScript
 	{
 		if (!isRunningHeadless())
 		{
-			printerr("This script is intended for use in headless mode only !");
+			printerr("This script must be run in headless mode !");
 			return;
 		}
-		
+
 		String[] strArgumentsArray = getScriptArgs();
 		if (strArgumentsArray.length == 0)
 		{
@@ -34,57 +35,88 @@ public class Exporter extends HeadlessScript
 		}
 
 		String strOutputFilepath = strArgumentsArray[0];
-		if (strOutputFilepath.length() == 0 || strOutputFilepath.length() > 255)
-		{
-			printerr("The provided output filepath '" + strOutputFilepath + "' is invalid !");
-			return;
-		}
-
-		File fileOutput = new File(strOutputFilepath);
+		File file = new File(strOutputFilepath);
 		try
 		{
-			if (fileOutput.exists())
+			if (file.exists())
 			{
-				printerr("The file '" + strOutputFilepath + "' already exists !");
+				printerr("The file or directory '" + strOutputFilepath + "' already exists !");
 				return;
 			}
 		}
 		catch (SecurityException securityException)
 		{
-			printerr("Unable to access the file '" + strOutputFilepath + "', permission denied !");
+			printerr("Failed to access the file or directory '" + strOutputFilepath + "', permission denied !");
 			return;
 		}
 
-		CppExporter cppExporter = new CppExporter();
-		cppExporter.setExporterServiceProvider(state.getTool());
-		
-		List<Option> optionsList = new ArrayList<Option>();
-		optionsList.add(new Option(CppExporter.CREATE_C_FILE, true));
-		try
+		Program program = this.getCurrentProgram();
+		DecompInterface decompInterface = new DecompInterface();
+		if (!decompInterface.openProgram(program))
 		{
-			cppExporter.setOptions(optionsList);
-		}
-		catch (OptionException optionException)
-		{
-			printerr("Failed to set the options for the object 'CppExporter' !");
+			printerr("Failed to initialize a decompiler process !");
 			return;
 		}
-		
+
+		DecompileOptions decompileOptions = new DecompileOptions();
+		decompileOptions.setWARNCommentIncluded(false);
+		if (!decompInterface.setOptions(decompileOptions))
+		{
+			printerr("Failed to set the decompiler options !");
+			decompInterface.closeProgram();
+			return;
+		}
+
+		FileWriter fileWriter;
 		try
 		{
-			cppExporter.export(fileOutput, currentProgram, null, monitor);
-		}
-		catch (ExporterException exporterException)
-		{
-			printerr("Failed to export the C code from the input file !");
-			return;
+			fileWriter = new FileWriter(file);
 		}
 		catch (IOException ioException)
 		{
-			printerr("Failed to save the exported C code to the file '" + strOutputFilepath + "' !");
+			printerr("Failed to construct a 'FileWriter' object !");
+			decompInterface.closeProgram();
 			return;
 		}
 
-		printf("Successfully saved the exported C code to the file '%s' !\n", strOutputFilepath);
+		FunctionIterator functionIterator = program.getListing().getFunctions(true);
+		while (functionIterator.hasNext())
+		{
+			Function function = functionIterator.next();
+			String strFunctionName = function.getName();
+			if (!strFunctionName.startsWith("FUN_"))
+				continue;
+
+			DecompileResults decompileResults = decompInterface.decompileFunction(function, 30, null);
+			if (!decompileResults.decompileCompleted())
+			{
+				printerr("Failed to decompile the function '" + strFunctionName + "', skipping !");
+				continue;
+			}
+
+			try
+			{
+				fileWriter.write(decompileResults.getDecompiledFunction().getC());
+			}
+			catch (IOException ioException)
+			{
+				printerr("Failed to write the decompiled version of the function '" + strFunctionName + "' " +
+					 "to the file '" + strOutputFilepath + "', skipping !");
+				continue;
+			}
+
+			printf("Successfully saved the decompiled version of the function '%s' to the file '%s' !\n", strFunctionName, strOutputFilepath);
+		}
+
+		decompInterface.closeProgram();
+
+		try
+		{
+			fileWriter.close();
+		}
+		catch (IOException ioException)
+		{
+			printerr("Failed to close the 'FileWriter' object !");
+		}
 	}
 }
